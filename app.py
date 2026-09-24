@@ -10,7 +10,7 @@ import requests
 st.set_page_config(page_title="Gerador 3D Multi-Modo", layout="wide")
 st.title(" Gerador de Modelos 3D a partir de Imagens")
 
-# Chave da API Tripo (Configurada)
+# Chave da API Tripo
 TRIPO_API_KEY = "tsk_IB_MJ9GR7Mn9eV0qXdYamU05XNEiEDzGpI3XUUl0l5b"
 
 # Menu lateral para escolher o modo
@@ -54,11 +54,11 @@ def image_to_stl(image_bytes, base_th, max_h, max_w):
     stl_buffer.seek(0)
     return stl_buffer
 
-# --- FUNÇÃO 2: IA TRIPO3D V3 ---
+# --- FUNÇÃO 2: IA TRIPO3D V3 (ATUALIZADA) ---
 def tripo_image_to_3d(image_bytes, filename):
     headers = {"Authorization": f"Bearer {TRIPO_API_KEY}"}
     
-    # 1. Enviar arquivo para a Tripo
+    # 1. Enviar arquivo para a Tripo (/v3/files)
     st.info(" Enviando imagem para os servidores da IA...")
     files = {"file": (filename, image_bytes)}
     upload_res = requests.post("https://openapi.tripo3d.ai/v3/files", headers=headers, files=files)
@@ -67,34 +67,31 @@ def tripo_image_to_3d(image_bytes, filename):
         st.error(f"Erro no envio da imagem: {upload_res.text}")
         return None
         
-    file_token = upload_res.json()["data"]["file_token"]
+    file_token = upload_res.json().get("data", {}).get("file_token")
 
-    # 2. Criar tarefa de conversão Image-to-Model
+    # 2. Criar tarefa no endpoint V3: /v3/generation/image-to-model
     st.info(" Iniciando IA de reconstrução 3D...")
     task_payload = {
-        "type": "image_to_model",
-        "file": {
-            "type": filename.split('.')[-1].lower(),
-            "file_token": file_token
-        }
+        "input": file_token,
+        "model": "tripo-v3.1"
     }
-    task_res = requests.post("https://openapi.tripo3d.ai/v3/task", headers=headers, json=task_payload)
+    task_res = requests.post("https://openapi.tripo3d.ai/v3/generation/image-to-model", headers=headers, json=task_payload)
     
     if task_res.status_code != 200:
         st.error(f"Erro ao criar tarefa: {task_res.text}")
         return None
 
-    task_id = task_res.json()["data"]["task_id"]
+    task_id = task_res.json().get("data", {}).get("task_id")
 
-    # 3. Aguardar processamento (Polling)
+    # 3. Consultar status (/v3/tasks/{task_id})
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    for _ in range(60): # Espera até ~2 minutos
+    for _ in range(60):  # Aguarda até 2 minutos
         time.sleep(2)
-        status_res = requests.get(f"https://openapi.tripo3d.ai/v3/task/{task_id}", headers=headers)
+        status_res = requests.get(f"https://openapi.tripo3d.ai/v3/tasks/{task_id}", headers=headers)
         if status_res.status_code == 200:
-            data = status_res.json()["data"]
+            data = status_res.json().get("data", {})
             status = data.get("status")
             progress = data.get("progress", 0)
             
@@ -102,10 +99,12 @@ def tripo_image_to_3d(image_bytes, filename):
             status_text.text(f"Progresso da IA: {progress}% (Status: {status})")
 
             if status == "success":
-                model_url = data["output"]["model"]
+                output = data.get("output", {})
+                # O link do modelo pode vir em "model_url" ou "model"
+                model_url = output.get("model_url") or output.get("model")
                 status_text.text(" Modelo gerado com sucesso!")
                 
-                # Baixa o modelo final
+                # Baixa o modelo gerado (.glb)
                 model_download = requests.get(model_url)
                 return model_download.content
             elif status in ["failed", "cancelled"]:
@@ -115,7 +114,7 @@ def tripo_image_to_3d(image_bytes, filename):
     st.warning("Tempo limite excedido. Tente novamente.")
     return None
 
-# --- EXECUÇÃO PRINCIPAL ---
+# --- INTERFACE PRINCIPAL ---
 if uploaded_file is not None:
     col1, col2 = st.columns(2)
     with col1:
@@ -141,7 +140,7 @@ if uploaded_file is not None:
 
         else:
             st.subheader("Modo Escultura Completa com IA")
-            st.write("A inteligência artificial irá criar a geometria frontal e traseira da imagem.")
+            st.write("A IA irá gerar a geometria frontal, traseira e volumétrica do objeto.")
             
             if st.button("Gerar Modelo 3D com IA"):
                 model_data = tripo_image_to_3d(uploaded_file.getvalue(), uploaded_file.name)
