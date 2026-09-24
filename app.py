@@ -1,65 +1,84 @@
 import streamlit as st
 import numpy as np
 from PIL import Image
-from stl import mesh
+import trimesh
+import requests
 import io
 import time
-import requests
+import os
 
 # Configuração da página
-st.set_page_config(page_title="Gerador 3D Multi-Modo", layout="wide")
-st.title(" Gerador de Modelos 3D a partir de Imagens")
+st.set_page_config(page_title="Gerador 3D - Relevo & IA", layout="centered")
 
-# Chave da API Tripo
-TRIPO_API_KEY = "tsk_IB_MJ9GR7Mn9eV0qXdYamU05XNEiEDzGpI3XUUl0l5b"
+st.title(" Conversor de Imagem para 3D")
+st.write("Crie modelos 3D a partir de fotos usando processamento local (Relevo STL) ou IA completa (Tripo3D GLB).")
 
-# Menu lateral para escolher o modo
+# Obter a chave API dos Secrets do Streamlit ou variáveis de ambiente
+TRIPO_API_KEY = st.secrets.get("TRIPO_API_KEY", os.getenv("TRIPO_API_KEY", ""))
+
+# Sidebar com configurações
 st.sidebar.header(" Configurações")
 modo = st.sidebar.radio(
-    "Escolha o Tipo de Geração:",
-    (" Litofania / Relevo (Rápido - STL)", " IA Tripo3D (Escultura Completa 360° - GLB)")
+    "Modo de Geração:",
+    ("Relevo em Altura (Local - STL)", "IA Tripo3D (Escultura Completa 360° - GLB)")
 )
 
-# Upload da Imagem
-uploaded_file = st.file_uploader("Envie sua imagem (PNG, JPG, WEBP)", type=["png", "jpg", "jpeg", "webp"])
+if modo == "Relevo em Altura (Local - STL)":
+    altura_max = st.sidebar.slider("Altura Máxima do Relevo (mm)", 1.0, 30.0, 10.0)
+    base_espessura = st.sidebar.slider("Espessura da Base (mm)", 0.5, 10.0, 2.0)
+    inverter = st.sidebar.checkbox("Inverter Alturas (Tons escuros mais altos)", value=False)
+else:
+    if not TRIPO_API_KEY:
+        st.sidebar.warning("⚠️ Chave TRIPO_API_KEY não encontrada nos Secrets!")
 
-# --- FUNÇÃO 1: RELEVO / LITOFANIA ---
-def image_to_stl(image_bytes, base_th, max_h, max_w):
-    img = Image.open(io.BytesIO(image_bytes)).convert('L')
-    w_percent = (max_w / float(img.size[0]))
-    h_size = int((float(img.size[1]) * float(w_percent)))
-    img = img.resize((max_w, h_size), Image.Resampling.LANCZOS)
+# --- FUNÇÃO 1: RELEVO LOCAL EM STL ---
+def criar_relevo_stl(imagem_pil, altura, base, inverter_alturas):
+    # Converte para tons de cinza
+    img_gray = imagem_pil.convert('L')
     
-    img_array = np.array(img, dtype=float)
-    img_array = (img_array / 255.0) * max_h + base_th
-    rows, cols = img_array.shape
+    # Redimensiona para manter o desempenho ágil
+    max_res = 350
+    img_gray.thumbnail((max_res, max_res), Image.Resampling.LANCZOS)
+    
+    arr = np.array(img_gray, dtype=np.float32)
+    if inverter_alturas:
+        arr = 255.0 - arr
+    
+    # Normaliza entre 0 e a altura desejada
+    arr = (arr / 255.0) * altura + base
+    
+    largura, comprimento = arr.shape[1], arr.shape[0]
+    
+    # Cria vértices
+    x = np.arange(largura)
+    y = np.arange(comprimento)
+    xx, yy = np.meshgrid(x, y)
+    
+    vertices = np.column_stack((xx.flatten(), yy.flatten(), arr.flatten()))
+    
+    # Cria faces (triângulos)
+    faces = []
+    for i in range(comprimento - 1):
+        for j in range(largura - 1):
+            idx = i * largura + j
+            # Triângulo 1
+            faces.append([idx, idx + largura, idx + 1])
+            # Triângulo 2
+            faces.append([idx + 1, idx + largura, idx + largura + 1])
+            
+    mesh = trimesh.Trimesh(vertices=vertices, faces=np.array(faces))
+    
+    # Exporta para STL
+    stl_io = io.BytesIO()
+    mesh.export(stl_io, file_type='stl')
+    return stl_io.getvalue()
 
-    num_triangles = (rows - 1) * (cols - 1) * 2
-    stl_mesh = mesh.Mesh(np.zeros(num_triangles, dtype=mesh.Mesh.dtype))
-
-    triangle_idx = 0
-    for i in range(rows - 1):
-        for j in range(cols - 1):
-            p1 = [j, rows - 1 - i, img_array[i, j]]
-            p2 = [j + 1, rows - 1 - i, img_array[i, j + 1]]
-            p3 = [j, rows - 1 - (i + 1), img_array[i + 1, j]]
-            p4 = [j + 1, rows - 1 - (i + 1), img_array[i + 1, j + 1]]
-
-            stl_mesh.vectors[triangle_idx] = np.array([p1, p2, p3])
-            stl_mesh.vectors[triangle_idx + 1] = np.array([p2, p4, p3])
-            triangle_idx += 2
-
-    stl_buffer = io.BytesIO()
-    stl_mesh.save(stl_buffer)
-    stl_buffer.seek(0)
-    return stl_buffer
-
-# --- FUNÇÃO 2: IA TRIPO3D V3 (ATUALIZADA) ---
+# --- FUNÇÃO 2: IA TRIPO3D V3 ---
 def tripo_image_to_3d(image_bytes, filename):
     headers = {"Authorization": f"Bearer {TRIPO_API_KEY}"}
     
     # 1. Enviar arquivo para a Tripo (/v3/files)
-    st.info(" Enviando imagem para os servidores da IA...")
+    st.info("📤 Enviando imagem para os servidores da IA...")
     files = {"file": (filename, image_bytes)}
     upload_res = requests.post("https://openapi.tripo3d.ai/v3/files", headers=headers, files=files)
     
@@ -69,11 +88,11 @@ def tripo_image_to_3d(image_bytes, filename):
         
     file_token = upload_res.json().get("data", {}).get("file_token")
 
-    # 2. Criar tarefa no endpoint V3: /v3/generation/image-to-model
-    st.info(" Iniciando IA de reconstrução 3D...")
+    # 2. Criar tarefa com o nome da versão aceita pela API
+    st.info("🤖 Iniciando IA de reconstrução 3D...")
     task_payload = {
         "input": file_token,
-        "model": "tripo-v3.1"
+        "model": "v3.1-20260211"
     }
     task_res = requests.post("https://openapi.tripo3d.ai/v3/generation/image-to-model", headers=headers, json=task_payload)
     
@@ -100,9 +119,8 @@ def tripo_image_to_3d(image_bytes, filename):
 
             if status == "success":
                 output = data.get("output", {})
-                # O link do modelo pode vir em "model_url" ou "model"
                 model_url = output.get("model_url") or output.get("model")
-                status_text.text(" Modelo gerado com sucesso!")
+                status_text.text("✅ Modelo gerado com sucesso!")
                 
                 # Baixa o modelo gerado (.glb)
                 model_download = requests.get(model_url)
@@ -115,39 +133,35 @@ def tripo_image_to_3d(image_bytes, filename):
     return None
 
 # --- INTERFACE PRINCIPAL ---
-if uploaded_file is not None:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(uploaded_file, caption="Imagem Original", use_container_width=True)
+arquivo = st.file_uploader("Selecione uma imagem (JPG, PNG ou WEBP)", type=["jpg", "jpeg", "png", "webp"])
 
-    with col2:
-        if modo.startswith(" Litofania"):
-            st.subheader("Parâmetros do Relevo")
-            base_th = st.sidebar.slider("Espessura da Base (mm)", 0.4, 5.0, 1.0)
-            max_h = st.sidebar.slider("Altura Máxima do Relevo (mm)", 1.0, 15.0, 4.0)
-            resolucao = st.sidebar.slider("Largura / Resolução (px)", 50, 400, 150)
-            
-            if st.button("Gerar STL de Relevo"):
-                with st.spinner("Esculpindo malha..."):
-                    stl_data = image_to_stl(uploaded_file.getvalue(), base_th, max_h, resolucao)
-                    st.success("Relevo pronto!")
+if arquivo is not None:
+    imagem = Image.open(arquivo)
+    st.image(imagem, caption="Imagem Carregada", use_container_width=True)
+    
+    if modo == "Relevo em Altura (Local - STL)":
+        if st.button("Gerar Relevo STL"):
+            with st.spinner("Processando malha 3D localmente..."):
+                stl_bytes = criar_relevo_stl(imagem, altura_max, base_espessura, inverter)
+                st.success("Relevo 3D gerado com sucesso!")
+                st.download_button(
+                    label="⬇️ Baixar Arquivo .STL",
+                    data=stl_bytes,
+                    file_name="relevo_3d.stl",
+                    mime="model/stl"
+                )
+                
+    else:  # Modo IA Tripo3D
+        if st.button("Gerar Modelo 3D com IA"):
+            if not TRIPO_API_KEY:
+                st.error("Configure sua chave TRIPO_API_KEY nos Secrets do Streamlit antes de continuar.")
+            else:
+                arquivo.seek(0)
+                glb_bytes = tripo_image_to_3d(arquivo.read(), arquivo.name)
+                if glb_bytes:
                     st.download_button(
-                        label=" Baixar Arquivo .STL",
-                        data=stl_data,
-                        file_name="relevo_litofania.stl",
-                        mime="application/octet-stream"
-                    )
-
-        else:
-            st.subheader("Modo Escultura Completa com IA")
-            st.write("A IA irá gerar a geometria frontal, traseira e volumétrica do objeto.")
-            
-            if st.button("Gerar Modelo 3D com IA"):
-                model_data = tripo_image_to_3d(uploaded_file.getvalue(), uploaded_file.name)
-                if model_data:
-                    st.download_button(
-                        label=" Baixar Modelo 3D (.GLB)",
-                        data=model_data,
-                        file_name="objeto_completo_3d.glb",
+                        label="⬇️ Baixar Modelo Completo (.GLB)",
+                        data=glb_bytes,
+                        file_name="modelo_3d.glb",
                         mime="model/gltf-binary"
                     )
